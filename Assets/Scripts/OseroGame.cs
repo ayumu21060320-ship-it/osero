@@ -2,8 +2,12 @@
 // PC（マウス・横画面）とスマホのブラウザ（タッチ・縦画面）の両方で動かす。
 // Web（WebGL）で使えない機能（別スレッド、PC のフォント）は使わない。
 //
+// 画面: 真ん中に 3D の盤。左のパネルに石の数・手番・ボタン。右のパネルに「見ている層」を平面にした 8×8 の盤。
+//       画面が縦長（スマホの縦画面）なら、上に 3D の盤、下に 2 つのパネルを並べる。
 // 操作:
-//   ・「段」（高さ）を 1 つ選び、その段のマスを押して石を置く。段は右の 1〜8 のボタン（PC は W/S・↑/↓ キーでも）で選ぶ
+//   ・置ける場所は、どの層でも半透明の青い立方体で出る。それを押すと石を置く（右の平面の盤の青いマスを押してもよい）
+//   ・見ている層は ▼▲（PC は W/S・↑/↓ キーでも）で変える。3D の盤ではその層に点線のマス目が出る
+//   ・「表示」ボタンで、3D の盤を「全部の層」と「見ている層だけ」で切り替える
 //   ・ドラッグで回転、ホイール（スマホは 2 本指）で拡大・縮小
 using System.Collections.Generic;
 using UnityEngine;
@@ -25,47 +29,66 @@ public class OseroGame : MonoBehaviour
 
     const int N = OseroBoard.N;
 
-    // ---- 見た目の設定 ----
-    static readonly Color BgColor = new Color(0.10f, 0.13f, 0.17f);
-    static readonly Color BlackColor = new Color(0.08f, 0.08f, 0.09f);
-    static readonly Color WhiteColor = new Color(0.93f, 0.93f, 0.90f);
-    static readonly Color LineColor = new Color(0.05f, 0.25f, 0.12f);
-    static readonly Color PlateColor = new Color(0.10f, 0.55f, 0.28f, 0.45f);
-    static readonly Color FrameColor = new Color(0.55f, 0.60f, 0.65f);
-    static readonly Color HintColor = new Color(1.0f, 0.85f, 0.2f, 0.55f);
-    const float ActiveScale = 0.82f;   // 今の段の石の大きさ（マス 1 に対して）
-    const float AllViewScale = 0.55f;  // 「全体を見る」のときの、ほかの段の石
-    const float OtherScale = 0.35f;    // ふだんの、ほかの段の石（半透明）
+    // ---- 色と大きさ ----
+    static readonly Color Background = new Color(0.95f, 0.95f, 0.97f);
+    static readonly Color BlackColor = new Color(0.12f, 0.12f, 0.13f);
+    static readonly Color WhiteColor = new Color(0.98f, 0.98f, 0.96f);
+    static readonly Color BlackGhostColor = new Color(0.1f, 0.1f, 0.1f, 0.35f);
+    static readonly Color WhiteGhostColor = new Color(0.75f, 0.75f, 0.80f, 0.45f);
+    static readonly Color FrameColor = new Color(0.62f, 0.62f, 0.68f);
+    static readonly Color GridColor = new Color(0.35f, 0.35f, 0.40f);
+    static readonly Color HintColor = new Color(0.35f, 0.55f, 1f, 0.28f);       // 置ける場所（半透明の青）
+    static readonly Color HintHoverColor = new Color(0.35f, 0.55f, 1f, 0.60f);  // マウスを乗せた置ける場所
+    static readonly Color LastColor = new Color(0.9f, 0.2f, 0.2f);
+    static readonly Color PanelColor = new Color(1f, 0.98f, 0.94f, 0.92f);
+    static readonly Color ButtonColor = new Color(0.95f, 0.84f, 0.58f);
+    static readonly Color TextColor = new Color(0.15f, 0.15f, 0.18f);
+    static readonly Color MessageColor = new Color(0.75f, 0.25f, 0.10f);
+    static readonly Color BoardGreen = new Color(0.20f, 0.56f, 0.33f);           // 右の平面の盤のマス
+    static readonly Color BoardLine = new Color(0.08f, 0.25f, 0.14f);
+    static readonly Color BoardLegal = new Color(0.62f, 0.76f, 1f);              // 右の平面の盤の置けるマス
+    const float HintSize = 0.86f;      // 置ける場所の立方体の大きさ（マス 1 に対して）
+    const float StoneScale = 0.6f;     // 石の大きさ
+    const float FocusScale = 0.8f;     // 「見ている層だけ」のときの、その層の石
+    const float OtherScale = 0.3f;     // 「見ている層だけ」のときの、ほかの層の石（半透明）
+    const float BoardCell = 52f;       // 右の平面の盤の 1 マスの大きさ（UI の単位）
 
     readonly OseroBoard board = new OseroBoard();
     readonly List<int> flipBuf = new List<int>();
-    int layer = 3;          // 今選んでいる段（0〜7）
-    bool showAll;           // 「全体を見る」
+    int viewLayer = 3;      // 見ている層（0〜7。画面では 1〜8 層）
+    bool focusOnly;         // 3D の盤で、見ている層だけをはっきり出す
     int lastMove = -1;
     readonly float[] changedAt = new float[OseroBoard.CellCount]; // 石が置かれた・裏返った時刻（ポンと動かす）
 
     // ---- 3D の物 ----
     Camera cam;
-    Material matBlack, matWhite, matBlackGhost, matWhiteGhost, matHint, matPlate, matLine, matFrame,
+    Material matBlack, matWhite, matBlackGhost, matWhiteGhost, matHint, matHintHover, matGrid, matFrame,
              matHoverBlack, matHoverWhite, matLast;
     Mesh sphereMesh, cubeMesh;
+    Transform boardRoot;
     readonly Transform[] stoneObj = new Transform[OseroBoard.CellCount];
     readonly MeshRenderer[] stoneRend = new MeshRenderer[OseroBoard.CellCount];
-    Transform layerRoot;           // 今の段の板と線（段を変えると上下に動く）
-    readonly List<Transform> hints = new List<Transform>();
+    Transform layerGrid;           // 見ている層の点線のマス目
+    readonly List<Transform> hints = new List<Transform>();      // 置ける場所の立方体（使い回す）
+    readonly List<MeshRenderer> hintRends = new List<MeshRenderer>();
+    readonly List<int> hintCells = new List<int>();             // 今出している立方体のマスの番号
+    int hoveredHint = -1;
     Transform hover; MeshRenderer hoverRend;
     Transform lastMark;
 
     // ---- カメラ ----
-    float yaw = 30f, pitch = 50f, zoom = 1f;
+    float yaw = 30f, pitch = 35f, zoom = 1f;
 
     // ---- UI ----
     Font font;
     CanvasScaler scaler;
-    Text statusText, messageText, helpText, allButtonText, restartButtonText;
-    readonly Button[] layerButtons = new Button[N];
-    readonly Text[] layerButtonTexts = new Text[N];
-    readonly List<RectTransform> uiAreas = new List<RectTransform>(); // ここを押しても石は置かない
+    RectTransform leftPanel, rightPanel;
+    int layoutPortrait = -1;   // 今の並べ方（1 = 縦画面、0 = 横画面、-1 = まだ）
+    Text statusText, messageText, helpText, newGameText, layerText, focusText, boardTitle, boardInfo;
+    readonly Image[] cellImg = new Image[N * N];     // 右の平面の盤のマス（[z * N + x]）
+    readonly Image[] cellStone = new Image[N * N];
+    readonly Image[] cellLast = new Image[N * N];
+    Sprite circleSprite;
     float messageUntil;
     float restartConfirmUntil;
 
@@ -82,10 +105,17 @@ public class OseroGame : MonoBehaviour
             cam.tag = "MainCamera";
         }
         cam.clearFlags = CameraClearFlags.SolidColor;
-        cam.backgroundColor = BgColor;
+        cam.backgroundColor = Background;
         cam.fieldOfView = 40f;
         cam.nearClipPlane = 0.3f;
         cam.farClipPlane = 200f;
+
+        // 縦画面では 3D の盤を画面の上だけに描くので、残りの所を背景色で塗るカメラ（何も映さない）
+        var bgCam = new GameObject("Background Camera").AddComponent<Camera>();
+        bgCam.clearFlags = CameraClearFlags.SolidColor;
+        bgCam.backgroundColor = Background;
+        bgCam.cullingMask = 0;
+        bgCam.depth = cam.depth - 10;
 
         MakeMaterials();
         MakeMeshes();
@@ -103,19 +133,21 @@ public class OseroGame : MonoBehaviour
     {
         Shader solid = Shader.Find("Osero3D/Solid");
         Shader ghost = Shader.Find("Osero3D/Ghost");
+        Shader glass = Shader.Find("Osero3D/Glass");
         if (solid == null) Debug.LogError("シェーダー Osero3D/Solid が見つからない（Assets/Resources/OseroSolid.shader）");
         if (ghost == null) Debug.LogError("シェーダー Osero3D/Ghost が見つからない（Assets/Resources/OseroGhost.shader）");
+        if (glass == null) { Debug.LogError("シェーダー Osero3D/Glass が見つからない（Assets/Resources/OseroGlass.shader）"); glass = ghost; }
         matBlack = M(solid, BlackColor);
         matWhite = M(solid, WhiteColor);
-        matBlackGhost = M(ghost, new Color(0.0f, 0.0f, 0.0f, 0.55f));
-        matWhiteGhost = M(ghost, new Color(1f, 1f, 1f, 0.35f));
-        matHoverBlack = M(ghost, new Color(0.05f, 0.05f, 0.05f, 0.6f));
-        matHoverWhite = M(ghost, new Color(1f, 1f, 1f, 0.6f));
-        matHint = M(ghost, HintColor);
-        matPlate = M(ghost, PlateColor);
-        matLine = M(solid, LineColor);
+        matBlackGhost = M(ghost, BlackGhostColor);
+        matWhiteGhost = M(ghost, WhiteGhostColor);
+        matHoverBlack = M(ghost, new Color(0.1f, 0.1f, 0.1f, 0.5f));
+        matHoverWhite = M(ghost, new Color(0.85f, 0.85f, 0.9f, 0.7f));
+        matHint = M(glass, HintColor);
+        matHintHover = M(glass, HintHoverColor);
+        matGrid = M(solid, GridColor);
         matFrame = M(solid, FrameColor);
-        matLast = M(solid, new Color(0.9f, 0.15f, 0.15f));
+        matLast = M(solid, LastColor);
     }
 
     static Material M(Shader s, Color c)
@@ -147,21 +179,21 @@ public class OseroGame : MonoBehaviour
         return go.transform;
     }
 
-    // マス (x,y,z) の中心の位置。盤全体の真ん中が (0,0,0)
+    // マス (x,y,z) の中心の位置。盤全体の真ん中が (0,0,0)。y が層（0 が一番下）
     static Vector3 CellPos(int x, int y, int z) => new Vector3(x - 3.5f, y - 3.5f, z - 3.5f);
     static float LayerY(int y) => y - 3.5f;
 
     void BuildBoard()
     {
-        var root = new GameObject("Board").transform;
+        boardRoot = new GameObject("Board").transform;
 
         // 外枠（立方体の 12 本の辺）
-        const float h = N / 2f, t = 0.04f;
+        const float h = N / 2f, t = 0.035f;
         for (int a = 0; a < 3; a++)
             for (int s1 = -1; s1 <= 1; s1 += 2)
                 for (int s2 = -1; s2 <= 1; s2 += 2)
                 {
-                    var e = MakeObj("Frame", cubeMesh, matFrame, root);
+                    var e = MakeObj("Frame", cubeMesh, matFrame, boardRoot);
                     Vector3 p = Vector3.zero, sc = Vector3.one * t;
                     if (a == 0) { p = new Vector3(0, s1 * h, s2 * h); sc.x = N + t; }
                     if (a == 1) { p = new Vector3(s1 * h, 0, s2 * h); sc.y = N + t; }
@@ -169,49 +201,45 @@ public class OseroGame : MonoBehaviour
                     e.localPosition = p; e.localScale = sc;
                 }
 
-        // 今の段の板と線
-        layerRoot = new GameObject("Layer").transform;
-        layerRoot.SetParent(root, false);
-        var plate = MakeObj("Plate", cubeMesh, matPlate, layerRoot);
-        plate.localScale = new Vector3(N, 0.02f, N);
-        plate.localPosition = new Vector3(0, -0.45f, 0);
+        // 見ている層の点線のマス目（層の底の高さに引く）
+        layerGrid = new GameObject("LayerGrid").transform;
+        layerGrid.SetParent(boardRoot, false);
+        const float dash = 0.3f, gap = 0.2f, lt = 0.025f;
+        int dashes = Mathf.RoundToInt(N / (dash + gap));
         for (int i = 0; i <= N; i++)
         {
             float p = i - h;
-            var lx = MakeObj("LineX", cubeMesh, matLine, layerRoot);
-            lx.localPosition = new Vector3(0, -0.44f, p); lx.localScale = new Vector3(N, 0.03f, 0.04f);
-            var lz = MakeObj("LineZ", cubeMesh, matLine, layerRoot);
-            lz.localPosition = new Vector3(p, -0.44f, 0); lz.localScale = new Vector3(0.04f, 0.03f, N);
+            for (int d = 0; d < dashes; d++)
+            {
+                float q = -h + d * (dash + gap) + dash / 2f + gap / 2f;
+                var lx = MakeObj("Dash", cubeMesh, matGrid, layerGrid);
+                lx.localPosition = new Vector3(q, -0.5f, p); lx.localScale = new Vector3(dash, lt, lt);
+                var lz = MakeObj("Dash", cubeMesh, matGrid, layerGrid);
+                lz.localPosition = new Vector3(p, -0.5f, q); lz.localScale = new Vector3(lt, lt, dash);
+            }
         }
 
         // 石（全部のマスに 1 つずつ作っておき、空きのマスでは隠す）
         for (int i = 0; i < OseroBoard.CellCount; i++)
         {
             OseroBoard.FromIndex(i, out int x, out int y, out int z);
-            var st = MakeObj("Stone", sphereMesh, matBlack, root);
+            var st = MakeObj("Stone", sphereMesh, matBlack, boardRoot);
             st.localPosition = CellPos(x, y, z);
             stoneObj[i] = st;
             stoneRend[i] = st.GetComponent<MeshRenderer>();
             st.gameObject.SetActive(false);
         }
 
-        // 置ける場所の印（今の段だけ。最大 64 個）
-        for (int i = 0; i < N * N; i++)
-        {
-            var hn = MakeObj("Hint", sphereMesh, matHint, root);
-            hn.localScale = Vector3.one * 0.22f;
-            hn.gameObject.SetActive(false);
-            hints.Add(hn);
-        }
+        // 置ける場所の立方体は Refresh で必要な数だけ作る
 
-        // マウスを乗せたマスに出す、うすい石
-        hover = MakeObj("Hover", sphereMesh, matHoverBlack, root);
-        hover.localScale = Vector3.one * ActiveScale;
+        // マウスを乗せた置ける場所に出す、うすい石
+        hover = MakeObj("Hover", sphereMesh, matHoverBlack, boardRoot);
+        hover.localScale = Vector3.one * StoneScale;
         hoverRend = hover.GetComponent<MeshRenderer>();
         hover.gameObject.SetActive(false);
 
         // 最後に置いた石の印（石の上に乗せる小さな赤い点）
-        lastMark = MakeObj("LastMove", sphereMesh, matLast, root);
+        lastMark = MakeObj("LastMove", sphereMesh, matLast, boardRoot);
         lastMark.gameObject.SetActive(false);
     }
 
@@ -221,6 +249,7 @@ public class OseroGame : MonoBehaviour
     {
         var uiFonts = Resources.LoadAll<Font>("UIFont");
         font = uiFonts.Length > 0 ? uiFonts[0] : Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+        circleSprite = MakeCircleSprite(64);
 
         if (FindAnyObjectByType<EventSystem>() == null)
         {
@@ -233,96 +262,223 @@ public class OseroGame : MonoBehaviour
 #endif
         }
 
-        var canvasGo = new GameObject("Canvas");
+        var canvasGo = new GameObject("UI");
         var canvas = canvasGo.AddComponent<Canvas>();
         canvas.renderMode = RenderMode.ScreenSpaceOverlay;
         scaler = canvasGo.AddComponent<CanvasScaler>();
         scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-        scaler.referenceResolution = new Vector2(1080, 1080);
+        scaler.referenceResolution = new Vector2(1920, 1080);
+        scaler.matchWidthOrHeight = 0.5f;
         canvasGo.AddComponent<GraphicRaycaster>();
-        var root = canvasGo.transform;
 
-        // 上: 石の数と手番
-        statusText = MakeText(root, "Status", 54, TextAnchor.UpperCenter);
-        Place(statusText.rectTransform, new Vector2(0.5f, 1), new Vector2(0, -20), new Vector2(900, 140));
+        // 左のパネル
+        var left = MakePanel(canvasGo.transform, 420f);
+        leftPanel = (RectTransform)left;
+        MakeText(left, "立体オセロ", 34, TextAnchor.MiddleLeft, 44);
+        statusText = MakeText(left, "", 22, TextAnchor.UpperLeft, 64);
+        messageText = MakeText(left, "", 20, TextAnchor.UpperLeft, 52);
+        messageText.color = MessageColor;
+        messageText.horizontalOverflow = HorizontalWrapMode.Wrap;
+        newGameText = MakeButton(MakeRow(left), "新しい対局", 160, OnNewGame);
+        var row = MakeRow(left);
+        MakeButton(row, "▼", 50, () => ChangeLayer(-1));
+        layerText = MakeText(row, "", 20, TextAnchor.MiddleCenter, 40, 170);
+        MakeButton(row, "▲", 50, () => ChangeLayer(1));
+        focusText = MakeButton(MakeRow(left), "", 388, () => { focusOnly = !focusOnly; Refresh(); });
+        helpText = MakeText(left, "", 17, TextAnchor.UpperLeft, 72);
 
-        // その下: パス・勝ち負けなどの知らせ
-        messageText = MakeText(root, "Message", 48, TextAnchor.UpperCenter);
-        messageText.color = new Color(1f, 0.85f, 0.3f);
-        Place(messageText.rectTransform, new Vector2(0.5f, 1), new Vector2(0, -160), new Vector2(1000, 140));
-
-        // 右: 段のボタン（上が 8 段目）
-        var col = new GameObject("Layers", typeof(RectTransform)).GetComponent<RectTransform>();
-        col.SetParent(root, false);
-        Place(col, new Vector2(1, 0.5f), new Vector2(-16, 0), new Vector2(150, N * 96 + 60));
-        uiAreas.Add(col);
-        var head = MakeText(col, "LayerHead", 30, TextAnchor.MiddleCenter);
-        head.text = "段";
-        Place(head.rectTransform, new Vector2(0.5f, 1), Vector2.zero, new Vector2(150, 50));
-        for (int i = 0; i < N; i++)
-        {
-            int y = i;
-            var b = MakeButton(col, "Layer" + (y + 1), "", 34, () => SetLayer(y));
-            Place((RectTransform)b.transform, new Vector2(0.5f, 1), new Vector2(0, -56 - (N - 1 - y) * 96), new Vector2(150, 88));
-            layerButtons[y] = b;
-            layerButtonTexts[y] = b.GetComponentInChildren<Text>();
-        }
-
-        // 左下: 全体を見る・最初から
-        var allBtn = MakeButton(root, "ShowAll", "全体を見る", 34, () => { showAll = !showAll; Refresh(); });
-        Place((RectTransform)allBtn.transform, new Vector2(0, 0), new Vector2(20, 100), new Vector2(260, 90));
-        allButtonText = allBtn.GetComponentInChildren<Text>();
-        uiAreas.Add((RectTransform)allBtn.transform);
-        var resetBtn = MakeButton(root, "Restart", "最初から", 34, OnRestart);
-        Place((RectTransform)resetBtn.transform, new Vector2(0, 0), new Vector2(300, 100), new Vector2(260, 90));
-        restartButtonText = resetBtn.GetComponentInChildren<Text>();
-        uiAreas.Add((RectTransform)resetBtn.transform);
-
-        // 一番下: 操作の説明
-        helpText = MakeText(root, "Help", 28, TextAnchor.LowerLeft);
-        helpText.color = new Color(1, 1, 1, 0.6f);
-        Place(helpText.rectTransform, new Vector2(0, 0), new Vector2(24, 16), new Vector2(1000, 70));
+        // 右のパネル（見ている層を平面にした盤）
+        var right = MakePanel(canvasGo.transform, BoardCell * N + 32);
+        rightPanel = (RectTransform)right;
+        var titleRow = MakeRow(right);
+        MakeButton(titleRow, "▼", 50, () => ChangeLayer(-1));
+        boardTitle = MakeText(titleRow, "", 24, TextAnchor.MiddleCenter, 40, BoardCell * N - 116);
+        MakeButton(titleRow, "▲", 50, () => ChangeLayer(1));
+        BuildFlatBoard(right);
+        boardInfo = MakeText(right, "", 18, TextAnchor.MiddleLeft, 28);
     }
 
-    Text MakeText(Transform parent, string name, int size, TextAnchor anchor)
+    // 右のパネルの 8×8 の盤。上が奥（z = 7）、下が手前（z = 0）。左から x = 0〜7
+    void BuildFlatBoard(Transform parent)
     {
-        var go = new GameObject(name, typeof(RectTransform));
+        var go = new GameObject("FlatBoard", typeof(RectTransform));
+        go.transform.SetParent(parent, false);
+        go.AddComponent<Image>().color = BoardLine;
+        var le = go.AddComponent<LayoutElement>();
+        le.preferredWidth = le.minWidth = BoardCell * N + 4;
+        le.preferredHeight = le.minHeight = BoardCell * N + 4;
+
+        for (int z = 0; z < N; z++)
+            for (int x = 0; x < N; x++)
+            {
+                int row = N - 1 - z;
+                var c = new GameObject("Cell", typeof(RectTransform));
+                c.transform.SetParent(go.transform, false);
+                var rt = (RectTransform)c.transform;
+                rt.anchorMin = rt.anchorMax = rt.pivot = new Vector2(0, 1);
+                rt.anchoredPosition = new Vector2(2 + x * BoardCell + 1, -(2 + row * BoardCell + 1));
+                rt.sizeDelta = new Vector2(BoardCell - 2, BoardCell - 2);
+                var img = c.AddComponent<Image>();
+                img.color = BoardGreen;
+                var b = c.AddComponent<Button>();
+                b.targetGraphic = img;
+                b.transition = Selectable.Transition.None;
+                int cx = x, cz = z;
+                b.onClick.AddListener(() => TryPlace(OseroBoard.Index(cx, viewLayer, cz)));
+
+                var st = new GameObject("Stone", typeof(RectTransform));
+                st.transform.SetParent(c.transform, false);
+                var srt = (RectTransform)st.transform;
+                srt.anchorMin = Vector2.zero; srt.anchorMax = Vector2.one;
+                srt.offsetMin = new Vector2(5, 5); srt.offsetMax = new Vector2(-5, -5);
+                var simg = st.AddComponent<Image>();
+                simg.sprite = circleSprite;
+                simg.raycastTarget = false;
+
+                var lm = new GameObject("Last", typeof(RectTransform));
+                lm.transform.SetParent(c.transform, false);
+                var lrt = (RectTransform)lm.transform;
+                lrt.anchorMin = lrt.anchorMax = lrt.pivot = new Vector2(0.5f, 0.5f);
+                lrt.sizeDelta = new Vector2(12, 12);
+                var limg = lm.AddComponent<Image>();
+                limg.sprite = circleSprite;
+                limg.color = LastColor;
+                limg.raycastTarget = false;
+
+                cellImg[z * N + x] = img;
+                cellStone[z * N + x] = simg;
+                cellLast[z * N + x] = limg;
+            }
+    }
+
+    // 丸い絵（石・印に使う）。ふちをなめらかにする
+    static Sprite MakeCircleSprite(int size)
+    {
+        var tex = new Texture2D(size, size, TextureFormat.RGBA32, false);
+        tex.wrapMode = TextureWrapMode.Clamp;
+        float r = size / 2f;
+        var px = new Color32[size * size];
+        for (int y = 0; y < size; y++)
+            for (int x = 0; x < size; x++)
+            {
+                float d = Mathf.Sqrt((x + 0.5f - r) * (x + 0.5f - r) + (y + 0.5f - r) * (y + 0.5f - r));
+                byte a = (byte)(Mathf.Clamp01(r - d) * 255);
+                px[y * size + x] = new Color32(255, 255, 255, a);
+            }
+        tex.SetPixels32(px);
+        tex.Apply();
+        return Sprite.Create(tex, new Rect(0, 0, size, size), new Vector2(0.5f, 0.5f), 100f);
+    }
+
+    Transform MakePanel(Transform parent, float width)
+    {
+        var go = new GameObject("Panel", typeof(RectTransform));
+        go.transform.SetParent(parent, false);
+        var rt = (RectTransform)go.transform;
+        rt.sizeDelta = new Vector2(width, 0);
+        go.AddComponent<Image>().color = PanelColor;
+        var v = go.AddComponent<VerticalLayoutGroup>();
+        v.padding = new RectOffset(14, 14, 12, 12);
+        v.spacing = 8;
+        v.childControlWidth = v.childControlHeight = true;
+        v.childForceExpandWidth = v.childForceExpandHeight = false;
+        var fit = go.AddComponent<ContentSizeFitter>();
+        fit.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+        return go.transform;
+    }
+
+    Transform MakeRow(Transform parent)
+    {
+        var go = new GameObject("Row", typeof(RectTransform));
+        go.transform.SetParent(parent, false);
+        var h = go.AddComponent<HorizontalLayoutGroup>();
+        h.spacing = 8;
+        h.childAlignment = TextAnchor.MiddleLeft;
+        h.childControlWidth = h.childControlHeight = true;
+        h.childForceExpandWidth = h.childForceExpandHeight = false;
+        go.AddComponent<LayoutElement>().preferredHeight = 40;
+        return go.transform;
+    }
+
+    Text MakeText(Transform parent, string s, int size, TextAnchor anchor, float height, float width = -1)
+    {
+        var go = new GameObject("Text", typeof(RectTransform));
         go.transform.SetParent(parent, false);
         var t = go.AddComponent<Text>();
         t.font = font;
         t.fontSize = size;
         t.alignment = anchor;
-        t.color = Color.white;
+        t.color = TextColor;
+        t.text = s;
         t.horizontalOverflow = HorizontalWrapMode.Overflow;
         t.verticalOverflow = VerticalWrapMode.Overflow;
         t.raycastTarget = false;
+        var le = go.AddComponent<LayoutElement>();
+        le.preferredHeight = le.minHeight = height;
+        if (width > 0) le.preferredWidth = le.minWidth = width;
+        else le.flexibleWidth = 1;
         return t;
     }
 
-    Button MakeButton(Transform parent, string name, string label, int size, UnityEngine.Events.UnityAction onClick)
+    // ボタンを作り、その文字（Text）を返す
+    Text MakeButton(Transform parent, string label, float width, UnityEngine.Events.UnityAction onClick)
     {
-        var go = new GameObject(name, typeof(RectTransform));
+        var go = new GameObject("Button", typeof(RectTransform));
         go.transform.SetParent(parent, false);
         var img = go.AddComponent<Image>();
-        img.color = new Color(0.22f, 0.27f, 0.33f, 0.92f);
+        img.color = ButtonColor;
         var b = go.AddComponent<Button>();
         b.targetGraphic = img;
         b.onClick.AddListener(onClick);
-        var t = MakeText(go.transform, "Label", size, TextAnchor.MiddleCenter);
+        var le = go.AddComponent<LayoutElement>();
+        le.preferredWidth = le.minWidth = width;
+        le.preferredHeight = le.minHeight = 40;
+
+        var tg = new GameObject("Label", typeof(RectTransform));
+        tg.transform.SetParent(go.transform, false);
+        var t = tg.AddComponent<Text>();
+        t.font = font;
+        t.fontSize = 20;
+        t.alignment = TextAnchor.MiddleCenter;
+        t.color = TextColor;
         t.text = label;
+        t.horizontalOverflow = HorizontalWrapMode.Overflow;
+        t.raycastTarget = false;
         var rt = t.rectTransform;
         rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one;
         rt.offsetMin = rt.offsetMax = Vector2.zero;
-        return b;
+        return t;
     }
 
-    // anchor の位置を基準に、pos だけずらした所に size の大きさで置く（基準点 = 枠の同じ側）
-    static void Place(RectTransform rt, Vector2 anchor, Vector2 pos, Vector2 size)
+    // ---- 縦画面・横画面の並べ方 ----
+    void ApplyLayout(bool portrait)
     {
-        rt.anchorMin = rt.anchorMax = anchor;
-        rt.pivot = anchor;
-        rt.anchoredPosition = pos;
-        rt.sizeDelta = size;
+        layoutPortrait = portrait ? 1 : 0;
+        if (portrait)
+        {
+            // 縦画面: 上に 3D の盤、下に左右 2 つのパネル。操作の説明は場所が無いので隠す
+            scaler.referenceResolution = new Vector2(1080, 1920);
+            scaler.matchWidthOrHeight = 0f;
+            SetPanel(leftPanel, new Vector2(0, 0), new Vector2(12, 12), 500f);
+            SetPanel(rightPanel, new Vector2(1, 0), new Vector2(-12, 12), BoardCell * N + 32);
+            cam.rect = new Rect(0f, 0.36f, 1f, 0.64f);
+        }
+        else
+        {
+            scaler.referenceResolution = new Vector2(1920, 1080);
+            scaler.matchWidthOrHeight = 0.5f;
+            SetPanel(leftPanel, new Vector2(0, 1), new Vector2(16, -16), 420f);
+            SetPanel(rightPanel, new Vector2(1, 1), new Vector2(-16, -16), BoardCell * N + 32);
+            cam.rect = new Rect(0f, 0f, 1f, 1f);
+        }
+        helpText.gameObject.SetActive(!portrait);
+    }
+
+    static void SetPanel(RectTransform rt, Vector2 corner, Vector2 offset, float width)
+    {
+        rt.anchorMin = rt.anchorMax = rt.pivot = corner;
+        rt.anchoredPosition = offset;
+        rt.sizeDelta = new Vector2(width, rt.sizeDelta.y);
     }
 
     void ShowMessage(string s, float seconds)
@@ -331,7 +487,7 @@ public class OseroGame : MonoBehaviour
         messageUntil = seconds > 0 ? Time.unscaledTime + seconds : float.MaxValue;
     }
 
-    void OnRestart()
+    void OnNewGame()
     {
         // 対局の途中は 2 回押したときだけ最初からにする（押し間違い防止）
         if (!board.GameOver && Time.unscaledTime > restartConfirmUntil)
@@ -342,31 +498,31 @@ public class OseroGame : MonoBehaviour
         restartConfirmUntil = 0;
         board.Reset();
         lastMove = -1;
-        layer = 3;
+        viewLayer = 3;
         for (int i = 0; i < changedAt.Length; i++) changedAt[i] = -10f;
         ShowMessage("", 0);
         Refresh();
     }
 
-    void SetLayer(int y)
+    void ChangeLayer(int d)
     {
-        layer = Mathf.Clamp(y, 0, N - 1);
+        viewLayer = Mathf.Clamp(viewLayer + d, 0, N - 1);
         Refresh();
     }
 
     // =====================================================================
     // 石を置く
-    void TryPlace(int x, int z)
+    void TryPlace(int cell)
     {
         if (board.GameOver) return;
         Stone mover = board.Turn;
-        if (!board.Play(x, layer, z, flipBuf, out var after)) return;
+        OseroBoard.FromIndex(cell, out int x, out int y, out int z);
+        if (!board.Play(x, y, z, flipBuf, out var after)) return;
 
         float now = Time.unscaledTime;
-        int placed = OseroBoard.Index(x, layer, z);
-        changedAt[placed] = now;
+        changedAt[cell] = now;
         foreach (int i in flipBuf) changedAt[i] = now;
-        lastMove = placed;
+        lastMove = cell;
 
         string moverName = mover == Stone.Black ? "黒" : "白";
         string otherName = mover == Stone.Black ? "白" : "黒";
@@ -376,50 +532,70 @@ public class OseroGame : MonoBehaviour
         {
             int b = board.Count(Stone.Black), w = board.Count(Stone.White);
             string result = b > w ? "黒の勝ち！" : w > b ? "白の勝ち！" : "引き分け";
-            ShowMessage("終わり　" + result + "　黒 " + b + " 対 白 " + w, 0);
+            ShowMessage("終わり　" + result + "（黒 " + b + " 対 白 " + w + "）", 0);
         }
         else
-            ShowMessage(moverName + "が " + flipBuf.Count + " 個裏返した", 2f);
+            ShowMessage(moverName + "が " + (y + 1) + "層に置いて " + flipBuf.Count + " 個裏返した", 3f);
         Refresh();
     }
 
     // 盤・UI の表示を今の状態に合わせる
     void Refresh()
     {
-        layerRoot.localPosition = new Vector3(0, LayerY(layer), 0);
+        layerGrid.localPosition = new Vector3(0, LayerY(viewLayer), 0);
 
-        // 置ける場所の印（今の段）と、段ごとの置ける数
-        int hintCount = 0;
+        // 置ける場所の立方体（全部の層、または見ている層だけ）と、層ごとの置ける数
+        SetHover(-1);
+        hintCells.Clear();
         int[] perLayer = new int[N];
-        for (int y = 0; y < N; y++)
-            for (int z = 0; z < N; z++)
-                for (int x = 0; x < N; x++)
-                {
-                    if (board.GameOver || !board.IsLegal(x, y, z, board.Turn)) continue;
-                    perLayer[y]++;
-                    if (y == layer)
-                    {
-                        hints[hintCount].localPosition = CellPos(x, y, z);
-                        hints[hintCount].gameObject.SetActive(true);
-                        hintCount++;
-                    }
-                }
-        for (int i = hintCount; i < hints.Count; i++) hints[i].gameObject.SetActive(false);
-
-        for (int y = 0; y < N; y++)
+        int total = 0;
+        bool[] legal = new bool[OseroBoard.CellCount];
+        for (int i = 0; i < OseroBoard.CellCount; i++)
         {
-            layerButtonTexts[y].text = (y + 1) + (perLayer[y] > 0 ? "  <size=26>(" + perLayer[y] + ")</size>" : "");
-            var img = (Image)layerButtons[y].targetGraphic;
-            img.color = y == layer ? new Color(0.15f, 0.55f, 0.30f, 0.95f)
-                      : perLayer[y] > 0 ? new Color(0.30f, 0.34f, 0.40f, 0.92f)
-                      : new Color(0.18f, 0.20f, 0.24f, 0.85f);
+            OseroBoard.FromIndex(i, out int x, out int y, out int z);
+            if (board.GameOver || !board.IsLegal(x, y, z, board.Turn)) continue;
+            legal[i] = true;
+            perLayer[y]++;
+            total++;
+            if (!focusOnly || y == viewLayer) hintCells.Add(i);
+        }
+        while (hints.Count < hintCells.Count)
+        {
+            var hn = MakeObj("Hint", cubeMesh, matHint, boardRoot);
+            hn.localScale = Vector3.one * HintSize;
+            hints.Add(hn);
+            hintRends.Add(hn.GetComponent<MeshRenderer>());
+        }
+        for (int k = 0; k < hints.Count; k++)
+        {
+            bool on = k < hintCells.Count;
+            hints[k].gameObject.SetActive(on);
+            if (!on) continue;
+            OseroBoard.FromIndex(hintCells[k], out int x, out int y, out int z);
+            hints[k].localPosition = CellPos(x, y, z);
+            hintRends[k].sharedMaterial = matHint;
         }
 
+        // 右の平面の盤
+        for (int z = 0; z < N; z++)
+            for (int x = 0; x < N; x++)
+            {
+                int i = OseroBoard.Index(x, viewLayer, z);
+                Stone s = board.Get(i);
+                cellImg[z * N + x].color = legal[i] ? BoardLegal : BoardGreen;
+                cellStone[z * N + x].enabled = s != Stone.Empty;
+                cellStone[z * N + x].color = s == Stone.Black ? BlackColor : WhiteColor;
+                cellLast[z * N + x].enabled = i == lastMove;
+            }
+        boardTitle.text = (viewLayer + 1) + "層の盤面";
+        boardInfo.text = board.GameOver ? "" : "この層に置ける所: " + perLayer[viewLayer] + " か所（青いマス）";
+
         int b = board.Count(Stone.Black), w = board.Count(Stone.White);
-        string turn = board.GameOver ? "対局終了" : (board.Turn == Stone.Black ? "● 黒の番" : "○ 白の番");
-        statusText.text = "● 黒 " + b + "　　○ 白 " + w + "\n" + turn
-            + (board.GameOver ? "" : "　<size=36>（" + (layer + 1) + "段目に置ける所 " + perLayer[layer] + "）</size>");
-        allButtonText.text = showAll ? "段だけ見る" : "全体を見る";
+        string turn = board.GameOver ? "対局終了" : (board.Turn == Stone.Black ? "● 黒の番です" : "○ 白の番です");
+        statusText.text = turn + (board.GameOver ? "" : "（置ける所 " + total + " か所）")
+            + "\n● 黒 " + b + "　○ 白 " + w;
+        layerText.text = "見ている層: " + (viewLayer + 1) + "層";
+        focusText.text = focusOnly ? "表示: 見ている層だけ" : "表示: 全部の層";
 
         UpdateStones();
     }
@@ -436,11 +612,10 @@ public class OseroGame : MonoBehaviour
             if (!go.activeSelf) go.SetActive(true);
 
             OseroBoard.FromIndex(i, out _, out int y, out _);
-            bool active = y == layer;
             Material m;
             float scale;
-            if (active) { m = s == Stone.Black ? matBlack : matWhite; scale = ActiveScale; }
-            else if (showAll) { m = s == Stone.Black ? matBlack : matWhite; scale = AllViewScale; }
+            if (!focusOnly) { m = s == Stone.Black ? matBlack : matWhite; scale = StoneScale; }
+            else if (y == viewLayer) { m = s == Stone.Black ? matBlack : matWhite; scale = FocusScale; }
             else { m = s == Stone.Black ? matBlackGhost : matWhiteGhost; scale = OtherScale; }
 
             float t = now - changedAt[i];
@@ -453,7 +628,7 @@ public class OseroGame : MonoBehaviour
         if (lastMove >= 0)
         {
             OseroBoard.FromIndex(lastMove, out int x, out int y, out int z);
-            float sc = y == layer ? ActiveScale : showAll ? AllViewScale : OtherScale;
+            float sc = !focusOnly ? StoneScale : y == viewLayer ? FocusScale : OtherScale;
             lastMark.gameObject.SetActive(true);
             lastMark.localPosition = CellPos(x, y, z) + Vector3.up * (sc * 0.5f + 0.04f);
             lastMark.localScale = Vector3.one * Mathf.Max(0.1f, sc * 0.22f);
@@ -472,12 +647,12 @@ public class OseroGame : MonoBehaviour
 
     void Update()
     {
+        bool portrait = Screen.height > Screen.width;
+        if ((portrait ? 1 : 0) != layoutPortrait) ApplyLayout(portrait);
+
         float now = Time.unscaledTime;
         if (now > messageUntil && messageText.text != "") messageText.text = "";
-        restartButtonText.text = (!board.GameOver && now < restartConfirmUntil) ? "もう一度押す" : "最初から";
-
-        // 縦長（スマホ）は横幅、横長（PC）は高さに合わせて UI の大きさを決める
-        scaler.matchWidthOrHeight = Screen.width > Screen.height ? 1f : 0f;
+        newGameText.text = (!board.GameOver && now < restartConfirmUntil) ? "もう一度押す" : "新しい対局";
 
         bool touchUsed = HandleTouch();
         if (!touchUsed && now - lastTouchTime > 0.5f) HandleMouse();
@@ -485,15 +660,26 @@ public class OseroGame : MonoBehaviour
 
         UpdateStones();
         helpText.text = now - lastTouchTime < 5f
-            ? "1本指で回転・2本指で拡大　段は右のボタンで選ぶ"
-            : "ドラッグで回転・ホイールで拡大　W/S・↑/↓ で段を移動";
+            ? "青い立方体を押す: 置く\n1本指: 回す　2本指: 拡大縮小"
+            : "左クリック（青い立方体）: 置く\nドラッグ: 回す　ホイール: 拡大縮小\n↑↓キー: 見る層を変える";
     }
 
     void LateUpdate()
     {
-        // 盤全体（半径約 7）が画面に収まるように距離を決める。縦長の画面ほど遠くから見る
+        // 盤全体（半径約 7）が画面に収まるように距離を決める。
+        // 横画面では左右にパネルがあるので、その間の幅に収める
         float vfov = cam.fieldOfView * Mathf.Deg2Rad;
-        float hfov = 2f * Mathf.Atan(Mathf.Tan(vfov / 2f) * cam.aspect);
+        float usable = 1f;
+        if (layoutPortrait == 0 && Screen.width > 0)
+        {
+            var corners = new Vector3[4];
+            leftPanel.GetWorldCorners(corners);
+            float l = corners[2].x / Screen.width;
+            rightPanel.GetWorldCorners(corners);
+            float r = 1f - corners[0].x / Screen.width;
+            usable = Mathf.Clamp(1f - 2f * Mathf.Max(l, r), 0.3f, 1f);
+        }
+        float hfov = 2f * Mathf.Atan(Mathf.Tan(vfov / 2f) * cam.aspect * usable);
         float fov = Mathf.Min(vfov, hfov);
         float dist = 7.2f / Mathf.Sin(fov / 2f) * zoom;
         var rot = Quaternion.Euler(pitch, yaw, 0);
@@ -514,10 +700,8 @@ public class OseroGame : MonoBehaviour
 
     bool OverUI(Vector2 screenPos)
     {
-        foreach (var rt in uiAreas)
-            if (rt.gameObject.activeInHierarchy && RectTransformUtility.RectangleContainsScreenPoint(rt, screenPos, null))
-                return true;
-        return false;
+        return RectTransformUtility.RectangleContainsScreenPoint(leftPanel, screenPos, null)
+            || RectTransformUtility.RectangleContainsScreenPoint(rightPanel, screenPos, null);
     }
 
     // 押し始め・動かす・離す（マウス 1 つ、またはタッチ 1 本）
@@ -540,34 +724,76 @@ public class OseroGame : MonoBehaviour
     {
         if (!pointerDown) return;
         pointerDown = false;
-        if (!dragging && !multiTouched && PickCell(p, out int x, out int z)) TryPlace(x, z);
+        if (!dragging && !multiTouched)
+        {
+            int k = PickHint(p);
+            if (k >= 0) TryPlace(hintCells[k]);
+        }
     }
 
-    // 画面の点 → 今の段のマス。段の高さの平面と、視線が交わる所
-    bool PickCell(Vector2 screenPos, out int x, out int z)
+    // 画面の点 → 押した「置ける場所の立方体」の番号（hintCells の何番目か）。無ければ -1。
+    // 視線が通る立方体のうち、一番手前のものを選ぶ（石は小さいので、石の後ろの立方体も押せる）
+    int PickHint(Vector2 screenPos)
     {
-        x = z = -1;
+        if (board.GameOver || OverUI(screenPos)) return -1;
+        if (!cam.pixelRect.Contains(screenPos)) return -1;
         Ray ray = cam.ScreenPointToRay(screenPos);
-        float planeY = LayerY(layer);
-        if (Mathf.Abs(ray.direction.y) < 1e-4f) return false;
-        float t = (planeY - ray.origin.y) / ray.direction.y;
-        if (t <= 0) return false;
-        Vector3 hit = ray.origin + ray.direction * t;
-        x = Mathf.FloorToInt(hit.x + N / 2f);
-        z = Mathf.FloorToInt(hit.z + N / 2f);
-        return x >= 0 && x < N && z >= 0 && z < N;
+        float half = HintSize / 2f;
+        int best = -1;
+        float bestT = float.MaxValue;
+        for (int k = 0; k < hintCells.Count; k++)
+        {
+            OseroBoard.FromIndex(hintCells[k], out int x, out int y, out int z);
+            Vector3 c = CellPos(x, y, z);
+            if (RayBox(ray, c - Vector3.one * half, c + Vector3.one * half, out float t) && t < bestT)
+            {
+                bestT = t;
+                best = k;
+            }
+        }
+        return best;
+    }
+
+    // 視線（ray）が箱（min〜max）に当たるか。当たったら手前の距離 t
+    static bool RayBox(Ray ray, Vector3 min, Vector3 max, out float t)
+    {
+        float tMin = 0f, tMax = float.MaxValue;
+        for (int a = 0; a < 3; a++)
+        {
+            float o = ray.origin[a], d = ray.direction[a];
+            if (Mathf.Abs(d) < 1e-6f)
+            {
+                if (o < min[a] || o > max[a]) { t = 0; return false; }
+                continue;
+            }
+            float t1 = (min[a] - o) / d, t2 = (max[a] - o) / d;
+            if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
+            tMin = Mathf.Max(tMin, t1);
+            tMax = Mathf.Min(tMax, t2);
+            if (tMin > tMax) { t = 0; return false; }
+        }
+        t = tMin;
+        return true;
+    }
+
+    // マウスを乗せた立方体を濃くして、中にうすい石を出す
+    void SetHover(int k)
+    {
+        if (hoveredHint == k) return;
+        if (hoveredHint >= 0 && hoveredHint < hintRends.Count) hintRends[hoveredHint].sharedMaterial = matHint;
+        hoveredHint = k;
+        if (k < 0) { hover.gameObject.SetActive(false); return; }
+        hintRends[k].sharedMaterial = matHintHover;
+        OseroBoard.FromIndex(hintCells[k], out int x, out int y, out int z);
+        hover.gameObject.SetActive(true);
+        hover.localPosition = CellPos(x, y, z);
+        hover.localScale = Vector3.one * (focusOnly ? FocusScale : StoneScale);
+        hoverRend.sharedMaterial = board.Turn == Stone.Black ? matHoverBlack : matHoverWhite;
     }
 
     void UpdateHover(Vector2 screenPos, bool valid)
     {
-        if (valid && !board.GameOver && !OverUI(screenPos) && PickCell(screenPos, out int x, out int z)
-            && board.IsLegal(x, layer, z, board.Turn))
-        {
-            hover.gameObject.SetActive(true);
-            hover.localPosition = CellPos(x, layer, z);
-            hoverRend.sharedMaterial = board.Turn == Stone.Black ? matHoverBlack : matHoverWhite;
-        }
-        else hover.gameObject.SetActive(false);
+        SetHover(valid ? PickHint(screenPos) : -1);
     }
 
 #if ENABLE_INPUT_SYSTEM
@@ -577,7 +803,7 @@ public class OseroGame : MonoBehaviour
         var touches = ETouch.Touch.activeTouches;
         if (touches.Count == 0) { lastPinchDist = -1f; return false; }
         lastTouchTime = Time.unscaledTime;
-        hover.gameObject.SetActive(false);
+        SetHover(-1);
 
         if (touches.Count >= 2)
         {
@@ -618,8 +844,8 @@ public class OseroGame : MonoBehaviour
     {
         var kb = Keyboard.current;
         if (kb == null) return;
-        if (kb.wKey.wasPressedThisFrame || kb.upArrowKey.wasPressedThisFrame) SetLayer(layer + 1);
-        if (kb.sKey.wasPressedThisFrame || kb.downArrowKey.wasPressedThisFrame) SetLayer(layer - 1);
+        if (kb.wKey.wasPressedThisFrame || kb.upArrowKey.wasPressedThisFrame) ChangeLayer(1);
+        if (kb.sKey.wasPressedThisFrame || kb.downArrowKey.wasPressedThisFrame) ChangeLayer(-1);
     }
 #else
     // ---- 古い Input Manager ----
@@ -627,7 +853,7 @@ public class OseroGame : MonoBehaviour
     {
         if (Input.touchCount == 0) { lastPinchDist = -1f; return false; }
         lastTouchTime = Time.unscaledTime;
-        hover.gameObject.SetActive(false);
+        SetHover(-1);
 
         if (Input.touchCount >= 2)
         {
@@ -664,8 +890,8 @@ public class OseroGame : MonoBehaviour
 
     void HandleKeys()
     {
-        if (Input.GetKeyDown(KeyCode.W) || Input.GetKeyDown(KeyCode.UpArrow)) SetLayer(layer + 1);
-        if (Input.GetKeyDown(KeyCode.S) || Input.GetKeyDown(KeyCode.DownArrow)) SetLayer(layer - 1);
+        if (Input.GetKeyDown(KeyCode.W) || Input.GetKeyDown(KeyCode.UpArrow)) ChangeLayer(1);
+        if (Input.GetKeyDown(KeyCode.S) || Input.GetKeyDown(KeyCode.DownArrow)) ChangeLayer(-1);
     }
 #endif
 }
