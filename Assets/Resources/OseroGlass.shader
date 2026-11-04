@@ -1,10 +1,10 @@
-// 「置ける場所」を表す薄い青の半透明の立方体。辺を少し濃く描いて、マスの境目を見やすくする。
+// 「置ける場所」を表す半透明の青い立方体。辺を少し濃く描いて、マスの境目を見やすくする。
 // Resources に置いてあるので、Web（WebGL）版にも必ず含まれる
 Shader "Osero3D/Glass"
 {
     Properties
     {
-        _BaseColor ("Color", Color) = (0.55, 0.80, 1, 0.22)
+        _BaseColor ("Color", Color) = (0.35, 0.55, 1, 0.28)
         _EdgeWidth ("Edge Width", Float) = 0.05
     }
     SubShader
@@ -43,6 +43,7 @@ Shader "Osero3D/Glass"
                 float edge = step(min(d.x, d.y), _EdgeWidth); // 面の端（立方体の辺）
                 fixed4 c = _BaseColor;
                 c.rgb *= i.shade;
+                c.rgb = lerp(c.rgb, c.rgb * 0.6, edge);
                 c.a = lerp(c.a, saturate(c.a * 2.8), edge);
                 return c;
             }
