@@ -9,6 +9,7 @@
 //   ・見ている層は ▼▲（PC は W/S・↑/↓ キーでも）で変える。3D の盤ではその層に点線のマス目が出る
 //   ・「表示」ボタンで、3D の盤を「全部の層」と「見ている層だけ」で切り替える
 //   ・ドラッグで回転、ホイール（スマホは 2 本指）で拡大・縮小
+//   ・「モード」ボタンで、CPU と対局（あなたが黒／白）と 2 人で対局を切り替える。「CPU の強さ」で弱い・普通・強い
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.UI;
@@ -58,6 +59,10 @@ public class OseroGame : MonoBehaviour
     int viewLayer = 3;      // 見ている層（0〜7。画面では 1〜8 層）
     bool focusOnly;         // 3D の盤で、見ている層だけをはっきり出す
     int lastMove = -1;
+    int mode;               // 0 = CPU と対局（あなたが黒・先手）、1 = CPU と対局（あなたが白）、2 = 2 人で対局
+    int level = 2;          // CPU の強さ 1〜3
+    OseroAI ai;             // CPU が考えている途中（考えていなければ null）
+    float cpuStartTime;
     readonly float[] changedAt = new float[OseroBoard.CellCount]; // 石が置かれた・裏返った時刻（ポンと動かす）
 
     // ---- 3D の物 ----
@@ -84,7 +89,7 @@ public class OseroGame : MonoBehaviour
     CanvasScaler scaler;
     RectTransform leftPanel, rightPanel;
     int layoutPortrait = -1;   // 今の並べ方（1 = 縦画面、0 = 横画面、-1 = まだ）
-    Text statusText, messageText, helpText, newGameText, layerText, focusText, boardTitle, boardInfo;
+    Text statusText, messageText, helpText, newGameText, modeText, levelText, layerText, focusText, boardTitle, boardInfo;
     readonly Image[] cellImg = new Image[N * N];     // 右の平面の盤のマス（[z * N + x]）
     readonly Image[] cellStone = new Image[N * N];
     readonly Image[] cellLast = new Image[N * N];
@@ -280,6 +285,8 @@ public class OseroGame : MonoBehaviour
         messageText.color = MessageColor;
         messageText.horizontalOverflow = HorizontalWrapMode.Wrap;
         newGameText = MakeButton(MakeRow(left), "新しい対局", 160, OnNewGame);
+        modeText = MakeButton(MakeRow(left), "", 388, () => { mode = (mode + 1) % 3; StartNewGame(); });
+        levelText = MakeButton(MakeRow(left), "", 388, () => { level = level % 3 + 1; Refresh(); });
         var row = MakeRow(left);
         MakeButton(row, "▼", 50, () => ChangeLayer(-1));
         layerText = MakeText(row, "", 20, TextAnchor.MiddleCenter, 40, 170);
@@ -496,6 +503,13 @@ public class OseroGame : MonoBehaviour
             return;
         }
         restartConfirmUntil = 0;
+        StartNewGame();
+    }
+
+    void StartNewGame()
+    {
+        restartConfirmUntil = 0;
+        ai = null;
         board.Reset();
         lastMove = -1;
         viewLayer = 3;
@@ -510,11 +524,42 @@ public class OseroGame : MonoBehaviour
         Refresh();
     }
 
+    // ---- CPU ----
+    Stone CpuColor => mode == 0 ? Stone.White : mode == 1 ? Stone.Black : Stone.Empty;
+    bool CpuTurn => !board.GameOver && mode != 2 && board.Turn == CpuColor;
+
+    // 画面に出す名前。CPU と対局のときは「あなた（黒）」「CPU（白）」
+    string Name(Stone c)
+    {
+        string color = c == Stone.Black ? "黒" : "白";
+        if (mode == 2) return color;
+        return (c == CpuColor ? "CPU" : "あなた") + "（" + color + "）";
+    }
+
+    // CPU の番なら、毎フレーム少しずつ考えて、考え終わったら置く（すぐ置くと見えにくいので 0.5 秒は待つ）
+    void UpdateCpu()
+    {
+        if (!CpuTurn) { ai = null; return; }
+        if (ai == null)
+        {
+            ai = new OseroAI(board, level, Random.Range(0, int.MaxValue));
+            cpuStartTime = Time.unscaledTime;
+        }
+        ai.Step(8);
+        if (ai.Done && Time.unscaledTime - cpuStartTime > 0.5f)
+        {
+            int m = ai.Result;
+            ai = null;
+            if (m >= 0) TryPlace(m, true);
+        }
+    }
+
     // =====================================================================
-    // 石を置く
-    void TryPlace(int cell)
+    // 石を置く（人が置くときは byCpu = false。CPU の番なら何もしない）
+    void TryPlace(int cell, bool byCpu = false)
     {
         if (board.GameOver) return;
+        if (!byCpu && CpuTurn) return;
         Stone mover = board.Turn;
         OseroBoard.FromIndex(cell, out int x, out int y, out int z);
         if (!board.Play(x, y, z, flipBuf, out var after)) return;
@@ -524,14 +569,14 @@ public class OseroGame : MonoBehaviour
         foreach (int i in flipBuf) changedAt[i] = now;
         lastMove = cell;
 
-        string moverName = mover == Stone.Black ? "黒" : "白";
-        string otherName = mover == Stone.Black ? "白" : "黒";
+        string moverName = Name(mover);
+        string otherName = Name(OseroBoard.Opponent(mover));
         if (after == OseroBoard.After.Passed)
             ShowMessage(otherName + "は置ける所が無いのでパス。もう一度" + moverName + "の番", 4f);
         else if (after == OseroBoard.After.GameOver)
         {
             int b = board.Count(Stone.Black), w = board.Count(Stone.White);
-            string result = b > w ? "黒の勝ち！" : w > b ? "白の勝ち！" : "引き分け";
+            string result = b > w ? Name(Stone.Black) + "の勝ち！" : w > b ? Name(Stone.White) + "の勝ち！" : "引き分け";
             ShowMessage("終わり　" + result + "（黒 " + b + " 対 白 " + w + "）", 0);
         }
         else
@@ -553,7 +598,7 @@ public class OseroGame : MonoBehaviour
         for (int i = 0; i < OseroBoard.CellCount; i++)
         {
             OseroBoard.FromIndex(i, out int x, out int y, out int z);
-            if (board.GameOver || !board.IsLegal(x, y, z, board.Turn)) continue;
+            if (board.GameOver || CpuTurn || !board.IsLegal(x, y, z, board.Turn)) continue; // CPU の番は出さない
             legal[i] = true;
             perLayer[y]++;
             total++;
@@ -588,14 +633,22 @@ public class OseroGame : MonoBehaviour
                 cellLast[z * N + x].enabled = i == lastMove;
             }
         boardTitle.text = (viewLayer + 1) + "層の盤面";
-        boardInfo.text = board.GameOver ? "" : "この層に置ける所: " + perLayer[viewLayer] + " か所（青いマス）";
+        boardInfo.text = board.GameOver || CpuTurn ? "" : "この層に置ける所: " + perLayer[viewLayer] + " か所（青いマス）";
 
         int b = board.Count(Stone.Black), w = board.Count(Stone.White);
-        string turn = board.GameOver ? "対局終了" : (board.Turn == Stone.Black ? "● 黒の番です" : "○ 白の番です");
-        statusText.text = turn + (board.GameOver ? "" : "（置ける所 " + total + " か所）")
+        string mark = board.Turn == Stone.Black ? "● " : "○ ";
+        string turn = board.GameOver ? "対局終了"
+                    : CpuTurn ? mark + Name(board.Turn) + "が考えています…"
+                    : mark + Name(board.Turn) + "の番です";
+        statusText.text = turn + (board.GameOver || CpuTurn ? "" : "（置ける所 " + total + " か所）")
             + "\n● 黒 " + b + "　○ 白 " + w;
         layerText.text = "見ている層: " + (viewLayer + 1) + "層";
         focusText.text = focusOnly ? "表示: 見ている層だけ" : "表示: 全部の層";
+        modeText.text = mode == 0 ? "モード: CPU と対局（あなたが黒）"
+                      : mode == 1 ? "モード: CPU と対局（あなたが白）"
+                      : "モード: 2 人で対局";
+        levelText.text = "CPU の強さ: " + (level == 1 ? "弱い" : level == 2 ? "普通" : "強い");
+        levelText.transform.parent.parent.gameObject.SetActive(mode != 2); // 2 人のときは強さの行ごと隠す
 
         UpdateStones();
     }
@@ -653,6 +706,8 @@ public class OseroGame : MonoBehaviour
         float now = Time.unscaledTime;
         if (now > messageUntil && messageText.text != "") messageText.text = "";
         newGameText.text = (!board.GameOver && now < restartConfirmUntil) ? "もう一度押す" : "新しい対局";
+
+        UpdateCpu();
 
         bool touchUsed = HandleTouch();
         if (!touchUsed && now - lastTouchTime > 0.5f) HandleMouse();
@@ -735,7 +790,7 @@ public class OseroGame : MonoBehaviour
     // 視線が通る立方体のうち、一番手前のものを選ぶ（石は小さいので、石の後ろの立方体も押せる）
     int PickHint(Vector2 screenPos)
     {
-        if (board.GameOver || OverUI(screenPos)) return -1;
+        if (board.GameOver || CpuTurn || OverUI(screenPos)) return -1;
         if (!cam.pixelRect.Contains(screenPos)) return -1;
         Ray ray = cam.ScreenPointToRay(screenPos);
         float half = HintSize / 2f;
