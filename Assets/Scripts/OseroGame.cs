@@ -3,7 +3,8 @@
 // Web（WebGL）で使えない機能（別スレッド、PC のフォント）は使わない。
 //
 // 操作:
-//   ・「段」（高さ）を 1 つ選び、その段のマスを押して石を置く。段は右の 1〜8 のボタン（PC は W/S・↑/↓ キーでも）で選ぶ
+//   ・置ける場所は、どの段（高さ）でも薄い青の四角（立方体）で出る。それを押すと石を置く
+//   ・中が見えにくいときは、右の 1〜8 のボタン（PC は W/S・↑/↓ キーでも）で段を 1 つに絞れる。「全部」で戻す
 //   ・ドラッグで回転、ホイール（スマホは 2 本指）で拡大・縮小
 using System.Collections.Generic;
 using UnityEngine;
@@ -32,27 +33,32 @@ public class OseroGame : MonoBehaviour
     static readonly Color LineColor = new Color(0.05f, 0.25f, 0.12f);
     static readonly Color PlateColor = new Color(0.10f, 0.55f, 0.28f, 0.45f);
     static readonly Color FrameColor = new Color(0.55f, 0.60f, 0.65f);
-    static readonly Color HintColor = new Color(1.0f, 0.85f, 0.2f, 0.55f);
-    const float ActiveScale = 0.82f;   // 今の段の石の大きさ（マス 1 に対して）
-    const float AllViewScale = 0.55f;  // 「全体を見る」のときの、ほかの段の石
-    const float OtherScale = 0.35f;    // ふだんの、ほかの段の石（半透明）
+    static readonly Color HintColor = new Color(0.55f, 0.80f, 1.0f, 0.20f);      // 置ける場所（薄い青）
+    static readonly Color HintHoverColor = new Color(0.55f, 0.85f, 1.0f, 0.55f); // マウスを乗せた置ける場所
+    const float HintSize = 0.86f;      // 置ける場所の四角の大きさ（マス 1 に対して）
+    const float AllViewScale = 0.6f;   // 全部の段を見ているときの石の大きさ
+    const float ActiveScale = 0.82f;   // 段を絞ったときの、その段の石
+    const float OtherScale = 0.35f;    // 段を絞ったときの、ほかの段の石（半透明）
 
     readonly OseroBoard board = new OseroBoard();
     readonly List<int> flipBuf = new List<int>();
-    int layer = 3;          // 今選んでいる段（0〜7）
-    bool showAll;           // 「全体を見る」
+    int layer = -1;         // -1 = 全部の段を見る（ふつう）。0〜7 = その段だけに絞る
     int lastMove = -1;
     readonly float[] changedAt = new float[OseroBoard.CellCount]; // 石が置かれた・裏返った時刻（ポンと動かす）
 
     // ---- 3D の物 ----
     Camera cam;
-    Material matBlack, matWhite, matBlackGhost, matWhiteGhost, matHint, matPlate, matLine, matFrame,
+    Material matBlack, matWhite, matBlackGhost, matWhiteGhost, matHint, matHintHover, matPlate, matLine, matFrame,
              matHoverBlack, matHoverWhite, matLast;
     Mesh sphereMesh, cubeMesh;
     readonly Transform[] stoneObj = new Transform[OseroBoard.CellCount];
     readonly MeshRenderer[] stoneRend = new MeshRenderer[OseroBoard.CellCount];
     Transform layerRoot;           // 今の段の板と線（段を変えると上下に動く）
-    readonly List<Transform> hints = new List<Transform>();
+    readonly List<Transform> hints = new List<Transform>();      // 置ける場所の四角（使い回す）
+    readonly List<MeshRenderer> hintRends = new List<MeshRenderer>();
+    readonly List<int> hintCells = new List<int>();             // 今出している四角のマスの番号
+    int hoveredHint = -1;
+    Transform rootT;
     Transform hover; MeshRenderer hoverRend;
     Transform lastMark;
 
@@ -62,9 +68,10 @@ public class OseroGame : MonoBehaviour
     // ---- UI ----
     Font font;
     CanvasScaler scaler;
-    Text statusText, messageText, helpText, allButtonText, restartButtonText;
+    Text statusText, messageText, helpText, restartButtonText;
     readonly Button[] layerButtons = new Button[N];
     readonly Text[] layerButtonTexts = new Text[N];
+    Button allLayersButton;
     readonly List<RectTransform> uiAreas = new List<RectTransform>(); // ここを押しても石は置かない
     float messageUntil;
     float restartConfirmUntil;
@@ -103,6 +110,8 @@ public class OseroGame : MonoBehaviour
     {
         Shader solid = Shader.Find("Osero3D/Solid");
         Shader ghost = Shader.Find("Osero3D/Ghost");
+        Shader glass = Shader.Find("Osero3D/Glass");
+        if (glass == null) { Debug.LogError("シェーダー Osero3D/Glass が見つからない（Assets/Resources/OseroGlass.shader）"); glass = ghost; }
         if (solid == null) Debug.LogError("シェーダー Osero3D/Solid が見つからない（Assets/Resources/OseroSolid.shader）");
         if (ghost == null) Debug.LogError("シェーダー Osero3D/Ghost が見つからない（Assets/Resources/OseroGhost.shader）");
         matBlack = M(solid, BlackColor);
@@ -111,7 +120,8 @@ public class OseroGame : MonoBehaviour
         matWhiteGhost = M(ghost, new Color(1f, 1f, 1f, 0.35f));
         matHoverBlack = M(ghost, new Color(0.05f, 0.05f, 0.05f, 0.6f));
         matHoverWhite = M(ghost, new Color(1f, 1f, 1f, 0.6f));
-        matHint = M(ghost, HintColor);
+        matHint = M(glass, HintColor);
+        matHintHover = M(glass, HintHoverColor);
         matPlate = M(ghost, PlateColor);
         matLine = M(solid, LineColor);
         matFrame = M(solid, FrameColor);
@@ -154,6 +164,7 @@ public class OseroGame : MonoBehaviour
     void BuildBoard()
     {
         var root = new GameObject("Board").transform;
+        rootT = root;
 
         // 外枠（立方体の 12 本の辺）
         const float h = N / 2f, t = 0.04f;
@@ -195,18 +206,11 @@ public class OseroGame : MonoBehaviour
             st.gameObject.SetActive(false);
         }
 
-        // 置ける場所の印（今の段だけ。最大 64 個）
-        for (int i = 0; i < N * N; i++)
-        {
-            var hn = MakeObj("Hint", sphereMesh, matHint, root);
-            hn.localScale = Vector3.one * 0.22f;
-            hn.gameObject.SetActive(false);
-            hints.Add(hn);
-        }
+        // 置ける場所の四角は Refresh で必要な数だけ作る
 
-        // マウスを乗せたマスに出す、うすい石
+        // マウスを乗せた置ける場所に出す、うすい石
         hover = MakeObj("Hover", sphereMesh, matHoverBlack, root);
-        hover.localScale = Vector3.one * ActiveScale;
+        hover.localScale = Vector3.one * AllViewScale;
         hoverRend = hover.GetComponent<MeshRenderer>();
         hover.gameObject.SetActive(false);
 
@@ -254,7 +258,7 @@ public class OseroGame : MonoBehaviour
         // 右: 段のボタン（上が 8 段目）
         var col = new GameObject("Layers", typeof(RectTransform)).GetComponent<RectTransform>();
         col.SetParent(root, false);
-        Place(col, new Vector2(1, 0.5f), new Vector2(-16, 0), new Vector2(150, N * 96 + 60));
+        Place(col, new Vector2(1, 0.5f), new Vector2(-16, 0), new Vector2(150, (N + 1) * 96 + 60));
         uiAreas.Add(col);
         var head = MakeText(col, "LayerHead", 30, TextAnchor.MiddleCenter);
         head.text = "段";
@@ -267,14 +271,12 @@ public class OseroGame : MonoBehaviour
             layerButtons[y] = b;
             layerButtonTexts[y] = b.GetComponentInChildren<Text>();
         }
+        allLayersButton = MakeButton(col, "AllLayers", "全部", 34, () => SetLayer(-1));
+        Place((RectTransform)allLayersButton.transform, new Vector2(0.5f, 1), new Vector2(0, -56 - N * 96), new Vector2(150, 88));
 
-        // 左下: 全体を見る・最初から
-        var allBtn = MakeButton(root, "ShowAll", "全体を見る", 34, () => { showAll = !showAll; Refresh(); });
-        Place((RectTransform)allBtn.transform, new Vector2(0, 0), new Vector2(20, 100), new Vector2(260, 90));
-        allButtonText = allBtn.GetComponentInChildren<Text>();
-        uiAreas.Add((RectTransform)allBtn.transform);
+        // 左下: 最初から
         var resetBtn = MakeButton(root, "Restart", "最初から", 34, OnRestart);
-        Place((RectTransform)resetBtn.transform, new Vector2(0, 0), new Vector2(300, 100), new Vector2(260, 90));
+        Place((RectTransform)resetBtn.transform, new Vector2(0, 0), new Vector2(20, 100), new Vector2(260, 90));
         restartButtonText = resetBtn.GetComponentInChildren<Text>();
         uiAreas.Add((RectTransform)resetBtn.transform);
 
@@ -342,28 +344,31 @@ public class OseroGame : MonoBehaviour
         restartConfirmUntil = 0;
         board.Reset();
         lastMove = -1;
-        layer = 3;
+        layer = -1;
         for (int i = 0; i < changedAt.Length; i++) changedAt[i] = -10f;
         ShowMessage("", 0);
         Refresh();
     }
 
+    // 段を絞る。-1 なら全部の段。今と同じ段のボタンをもう一度押したら全部に戻す
     void SetLayer(int y)
     {
-        layer = Mathf.Clamp(y, 0, N - 1);
+        y = Mathf.Clamp(y, -1, N - 1);
+        layer = (y == layer && y >= 0) ? -1 : y;
         Refresh();
     }
 
     // =====================================================================
     // 石を置く
-    void TryPlace(int x, int z)
+    void TryPlace(int cell)
     {
         if (board.GameOver) return;
         Stone mover = board.Turn;
-        if (!board.Play(x, layer, z, flipBuf, out var after)) return;
+        OseroBoard.FromIndex(cell, out int x, out int y, out int z);
+        if (!board.Play(x, y, z, flipBuf, out var after)) return;
 
         float now = Time.unscaledTime;
-        int placed = OseroBoard.Index(x, layer, z);
+        int placed = cell;
         changedAt[placed] = now;
         foreach (int i in flipBuf) changedAt[i] = now;
         lastMove = placed;
@@ -386,25 +391,38 @@ public class OseroGame : MonoBehaviour
     // 盤・UI の表示を今の状態に合わせる
     void Refresh()
     {
-        layerRoot.localPosition = new Vector3(0, LayerY(layer), 0);
+        layerRoot.gameObject.SetActive(layer >= 0);
+        if (layer >= 0) layerRoot.localPosition = new Vector3(0, LayerY(layer), 0);
 
-        // 置ける場所の印（今の段）と、段ごとの置ける数
-        int hintCount = 0;
+        // 置ける場所の四角（全部の段、または絞った段）と、段ごとの置ける数
+        SetHover(-1);
+        hintCells.Clear();
         int[] perLayer = new int[N];
-        for (int y = 0; y < N; y++)
-            for (int z = 0; z < N; z++)
-                for (int x = 0; x < N; x++)
-                {
-                    if (board.GameOver || !board.IsLegal(x, y, z, board.Turn)) continue;
-                    perLayer[y]++;
-                    if (y == layer)
-                    {
-                        hints[hintCount].localPosition = CellPos(x, y, z);
-                        hints[hintCount].gameObject.SetActive(true);
-                        hintCount++;
-                    }
-                }
-        for (int i = hintCount; i < hints.Count; i++) hints[i].gameObject.SetActive(false);
+        int total = 0;
+        for (int i = 0; i < OseroBoard.CellCount; i++)
+        {
+            OseroBoard.FromIndex(i, out int x, out int y, out int z);
+            if (board.GameOver || !board.IsLegal(x, y, z, board.Turn)) continue;
+            perLayer[y]++;
+            total++;
+            if (layer < 0 || y == layer) hintCells.Add(i);
+        }
+        while (hints.Count < hintCells.Count)
+        {
+            var hn = MakeObj("Hint", cubeMesh, matHint, rootT);
+            hn.localScale = Vector3.one * HintSize;
+            hints.Add(hn);
+            hintRends.Add(hn.GetComponent<MeshRenderer>());
+        }
+        for (int k = 0; k < hints.Count; k++)
+        {
+            bool on = k < hintCells.Count;
+            hints[k].gameObject.SetActive(on);
+            if (!on) continue;
+            OseroBoard.FromIndex(hintCells[k], out int x, out int y, out int z);
+            hints[k].localPosition = CellPos(x, y, z);
+            hintRends[k].sharedMaterial = matHint;
+        }
 
         for (int y = 0; y < N; y++)
         {
@@ -414,12 +432,14 @@ public class OseroGame : MonoBehaviour
                       : perLayer[y] > 0 ? new Color(0.30f, 0.34f, 0.40f, 0.92f)
                       : new Color(0.18f, 0.20f, 0.24f, 0.85f);
         }
+        ((Image)allLayersButton.targetGraphic).color = layer < 0 ? new Color(0.15f, 0.55f, 0.30f, 0.95f)
+                                                                  : new Color(0.30f, 0.34f, 0.40f, 0.92f);
 
         int b = board.Count(Stone.Black), w = board.Count(Stone.White);
         string turn = board.GameOver ? "対局終了" : (board.Turn == Stone.Black ? "● 黒の番" : "○ 白の番");
+        string where = layer < 0 ? "置ける所 " + total : (layer + 1) + "段目に置ける所 " + perLayer[layer];
         statusText.text = "● 黒 " + b + "　　○ 白 " + w + "\n" + turn
-            + (board.GameOver ? "" : "　<size=36>（" + (layer + 1) + "段目に置ける所 " + perLayer[layer] + "）</size>");
-        allButtonText.text = showAll ? "段だけ見る" : "全体を見る";
+            + (board.GameOver ? "" : "　<size=36>（" + where + "）</size>");
 
         UpdateStones();
     }
@@ -436,11 +456,10 @@ public class OseroGame : MonoBehaviour
             if (!go.activeSelf) go.SetActive(true);
 
             OseroBoard.FromIndex(i, out _, out int y, out _);
-            bool active = y == layer;
             Material m;
             float scale;
-            if (active) { m = s == Stone.Black ? matBlack : matWhite; scale = ActiveScale; }
-            else if (showAll) { m = s == Stone.Black ? matBlack : matWhite; scale = AllViewScale; }
+            if (layer < 0) { m = s == Stone.Black ? matBlack : matWhite; scale = AllViewScale; }
+            else if (y == layer) { m = s == Stone.Black ? matBlack : matWhite; scale = ActiveScale; }
             else { m = s == Stone.Black ? matBlackGhost : matWhiteGhost; scale = OtherScale; }
 
             float t = now - changedAt[i];
@@ -453,7 +472,7 @@ public class OseroGame : MonoBehaviour
         if (lastMove >= 0)
         {
             OseroBoard.FromIndex(lastMove, out int x, out int y, out int z);
-            float sc = y == layer ? ActiveScale : showAll ? AllViewScale : OtherScale;
+            float sc = layer < 0 ? AllViewScale : y == layer ? ActiveScale : OtherScale;
             lastMark.gameObject.SetActive(true);
             lastMark.localPosition = CellPos(x, y, z) + Vector3.up * (sc * 0.5f + 0.04f);
             lastMark.localScale = Vector3.one * Mathf.Max(0.1f, sc * 0.22f);
@@ -485,8 +504,8 @@ public class OseroGame : MonoBehaviour
 
         UpdateStones();
         helpText.text = now - lastTouchTime < 5f
-            ? "1本指で回転・2本指で拡大　段は右のボタンで選ぶ"
-            : "ドラッグで回転・ホイールで拡大　W/S・↑/↓ で段を移動";
+            ? "青い四角を押して置く\n1本指で回転・2本指で拡大　右のボタンで段を絞れる"
+            : "青い四角を押して置く\nドラッグで回転・ホイールで拡大　W/S・↑/↓ で段を絞る";
     }
 
     void LateUpdate()
@@ -540,34 +559,74 @@ public class OseroGame : MonoBehaviour
     {
         if (!pointerDown) return;
         pointerDown = false;
-        if (!dragging && !multiTouched && PickCell(p, out int x, out int z)) TryPlace(x, z);
+        if (!dragging && !multiTouched)
+        {
+            int k = PickHint(p);
+            if (k >= 0) TryPlace(hintCells[k]);
+        }
     }
 
-    // 画面の点 → 今の段のマス。段の高さの平面と、視線が交わる所
-    bool PickCell(Vector2 screenPos, out int x, out int z)
+    // 画面の点 → 押した「置ける場所の四角」の番号（hintCells の何番目か）。無ければ -1。
+    // 視線が通る四角のうち、一番手前のものを選ぶ（石は小さいので、石の後ろの四角も押せる）
+    int PickHint(Vector2 screenPos)
     {
-        x = z = -1;
+        if (board.GameOver || OverUI(screenPos)) return -1;
         Ray ray = cam.ScreenPointToRay(screenPos);
-        float planeY = LayerY(layer);
-        if (Mathf.Abs(ray.direction.y) < 1e-4f) return false;
-        float t = (planeY - ray.origin.y) / ray.direction.y;
-        if (t <= 0) return false;
-        Vector3 hit = ray.origin + ray.direction * t;
-        x = Mathf.FloorToInt(hit.x + N / 2f);
-        z = Mathf.FloorToInt(hit.z + N / 2f);
-        return x >= 0 && x < N && z >= 0 && z < N;
+        float half = HintSize / 2f;
+        int best = -1;
+        float bestT = float.MaxValue;
+        for (int k = 0; k < hintCells.Count; k++)
+        {
+            OseroBoard.FromIndex(hintCells[k], out int x, out int y, out int z);
+            Vector3 c = CellPos(x, y, z);
+            if (RayBox(ray, c - Vector3.one * half, c + Vector3.one * half, out float t) && t < bestT)
+            {
+                bestT = t;
+                best = k;
+            }
+        }
+        return best;
+    }
+
+    // 視線（ray）が箱（min〜max）に当たるか。当たったら手前の距離 t
+    static bool RayBox(Ray ray, Vector3 min, Vector3 max, out float t)
+    {
+        float tMin = 0f, tMax = float.MaxValue;
+        for (int a = 0; a < 3; a++)
+        {
+            float o = ray.origin[a], d = ray.direction[a];
+            if (Mathf.Abs(d) < 1e-6f)
+            {
+                if (o < min[a] || o > max[a]) { t = 0; return false; }
+                continue;
+            }
+            float t1 = (min[a] - o) / d, t2 = (max[a] - o) / d;
+            if (t1 > t2) { float tmp = t1; t1 = t2; t2 = tmp; }
+            tMin = Mathf.Max(tMin, t1);
+            tMax = Mathf.Min(tMax, t2);
+            if (tMin > tMax) { t = 0; return false; }
+        }
+        t = tMin;
+        return true;
+    }
+
+    // マウスを乗せた四角を濃くして、中にうすい石を出す
+    void SetHover(int k)
+    {
+        if (hoveredHint == k) return;
+        if (hoveredHint >= 0 && hoveredHint < hintRends.Count) hintRends[hoveredHint].sharedMaterial = matHint;
+        hoveredHint = k;
+        if (k < 0) { hover.gameObject.SetActive(false); return; }
+        hintRends[k].sharedMaterial = matHintHover;
+        OseroBoard.FromIndex(hintCells[k], out int x, out int y, out int z);
+        hover.gameObject.SetActive(true);
+        hover.localPosition = CellPos(x, y, z);
+        hoverRend.sharedMaterial = board.Turn == Stone.Black ? matHoverBlack : matHoverWhite;
     }
 
     void UpdateHover(Vector2 screenPos, bool valid)
     {
-        if (valid && !board.GameOver && !OverUI(screenPos) && PickCell(screenPos, out int x, out int z)
-            && board.IsLegal(x, layer, z, board.Turn))
-        {
-            hover.gameObject.SetActive(true);
-            hover.localPosition = CellPos(x, layer, z);
-            hoverRend.sharedMaterial = board.Turn == Stone.Black ? matHoverBlack : matHoverWhite;
-        }
-        else hover.gameObject.SetActive(false);
+        SetHover(valid ? PickHint(screenPos) : -1);
     }
 
 #if ENABLE_INPUT_SYSTEM
@@ -577,7 +636,7 @@ public class OseroGame : MonoBehaviour
         var touches = ETouch.Touch.activeTouches;
         if (touches.Count == 0) { lastPinchDist = -1f; return false; }
         lastTouchTime = Time.unscaledTime;
-        hover.gameObject.SetActive(false);
+        SetHover(-1);
 
         if (touches.Count >= 2)
         {
@@ -627,7 +686,7 @@ public class OseroGame : MonoBehaviour
     {
         if (Input.touchCount == 0) { lastPinchDist = -1f; return false; }
         lastTouchTime = Time.unscaledTime;
-        hover.gameObject.SetActive(false);
+        SetHover(-1);
 
         if (Input.touchCount >= 2)
         {
