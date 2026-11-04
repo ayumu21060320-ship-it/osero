@@ -118,6 +118,59 @@ public class OseroBoard
         return n;
     }
 
+    // 置ける場所を全部 result に入れる
+    public List<int> LegalMoves(Stone color, List<int> result)
+    {
+        result.Clear();
+        for (int i = 0; i < CellCount; i++)
+        {
+            if (cells[i] != Stone.Empty) continue;
+            FromIndex(i, out int x, out int y, out int z);
+            if (IsLegal(x, y, z, color)) result.Add(i);
+        }
+        return result;
+    }
+
+    public int CountLegalMoves(Stone color)
+    {
+        int n = 0;
+        for (int i = 0; i < CellCount; i++)
+        {
+            if (cells[i] != Stone.Empty) continue;
+            FromIndex(i, out int x, out int y, out int z);
+            if (IsLegal(x, y, z, color)) n++;
+        }
+        return n;
+    }
+
+    public OseroBoard Clone()
+    {
+        var b = new OseroBoard();
+        System.Array.Copy(cells, b.cells, CellCount);
+        b.Turn = Turn;
+        b.GameOver = GameOver;
+        return b;
+    }
+
+    // CPU が先読みするときに使う: 手番を変えずに石を置いて裏返す／元に戻す。
+    // Apply は置けないマスなら false を返し、何も変えない
+    public bool Apply(int cell, Stone color, List<int> flipped)
+    {
+        FromIndex(cell, out int x, out int y, out int z);
+        Flips(x, y, z, color, flipped);
+        if (flipped.Count == 0) return false;
+        cells[cell] = color;
+        foreach (int i in flipped) cells[i] = color;
+        return true;
+    }
+
+    public void Undo(int cell, Stone color, List<int> flipped)
+    {
+        cells[cell] = Stone.Empty;
+        Stone opp = Opponent(color);
+        foreach (int i in flipped) cells[i] = opp;
+    }
+
     public enum After { Normal, Passed, GameOver }
 
     // 手番の人が (x,y,z) に置く。置けないなら false。
